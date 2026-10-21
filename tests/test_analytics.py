@@ -117,3 +117,46 @@ def test_activity_summary_for_missing_customer(client):
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Customer not found."
+
+
+def test_activity_summary_respects_7_day_and_30_day_windows(client):
+    # Add events at known points in time so the date-window logic is testable.
+    now = datetime.now(timezone.utc)
+
+    db = TestingSessionLocal()
+    db.add_all([
+        UsageEvent(
+            customer_id=2,
+            event_type="login",
+            description="Recent login",
+            occurred_at=now - timedelta(days=1),
+        ),
+        UsageEvent(
+            customer_id=2,
+            event_type="feature_used",
+            description="Activity from 10 days ago",
+            occurred_at=now - timedelta(days=10),
+        ),
+        UsageEvent(
+            customer_id=2,
+            event_type="support_request",
+            description="Activity from 40 days ago",
+            occurred_at=now - timedelta(days=40),
+        ),
+    ])
+    db.commit()
+    db.close()
+
+    response = client.get("/analytics/customers/2/activity")
+
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["total_events"] == 3
+    assert data["events_last_7_days"] == 1
+    assert data["events_last_30_days"] == 2
+    assert data["logins_last_7_days"] == 1
+    assert data["login_count"] == 1
+    assert data["feature_used_count"] == 1
+    assert data["support_request_count"] == 1
+    assert data["days_since_last_activity"] == 1
