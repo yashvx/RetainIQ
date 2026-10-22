@@ -63,3 +63,22 @@ class UsageEventResponse(BaseModel):
     occurred_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class ChurnPredictionRequest(BaseModel):
+    plan: Literal["basic", "pro", "enterprise"]
+    monthly_price: Decimal = Field(gt=0, max_digits=10, decimal_places=2)
+    tenure_months: int = Field(ge=1, le=600)
+    logins_last_30_days: int = Field(ge=0, le=10000)
+    feature_uses_last_30_days: int = Field(ge=0, le=100000)
+    support_requests_last_30_days: int = Field(ge=0, le=10000)
+    days_since_last_activity: int = Field(ge=0, le=3650)
+
+
+class ChurnPredictionResponse(BaseModel):
+    churn_probability: float = Field(ge=0, le=1)
+    risk_level: Literal["low", "medium", "high"]
+    predicted_churn: bool
+    model_notice: str
+    customer_id: int | None = None
+    features_used: dict | None = None

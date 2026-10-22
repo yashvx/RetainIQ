@@ -8,6 +8,8 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import Customer, Subscription, UsageEvent
+from ml.predict import load_model, predict_churn
+
 from app.schemas import (
     CustomerCreate,
     CustomerResponse,
@@ -15,10 +17,16 @@ from app.schemas import (
     SubscriptionResponse,
     UsageEventCreate,
     UsageEventResponse,
+    ChurnPredictionRequest,
+    ChurnPredictionResponse,
 )
 
 
 tags_metadata = [
+    {
+        "name": "Machine Learning",
+        "description": "Prototype customer churn predictions.",
+    },
     {
         "name": "Analytics",
         "description": "Customer activity metrics and insights.",
@@ -51,6 +59,9 @@ app = FastAPI(
 )
 
 
+churn_model = load_model()
+
+
 @app.get("/")
 def root():
     return {
@@ -62,6 +73,18 @@ def root():
 @app.get("/health")
 def health_check():
     return {"status": "healthy"}
+
+
+@app.post(
+    "/predict/churn",
+    response_model=ChurnPredictionResponse,
+    tags=["Machine Learning"],
+)
+def predict_customer_churn(
+    request: ChurnPredictionRequest,
+):
+    features = request.model_dump()
+    return predict_churn(churn_model, features)
 
 
 @app.post(
@@ -138,7 +161,7 @@ def list_subscriptions(db: Session = Depends(get_db)):
     "/usage-events",
     response_model=UsageEventResponse,
     status_code=status.HTTP_201_CREATED,
-    tags=["Usage-events"],
+    tags=["Usage Events"],
 )
 def create_usage_event(
     event_data: UsageEventCreate,
@@ -174,6 +197,96 @@ def list_usage_events(
         statement = statement.where(UsageEvent.customer_id == customer_id)
 
     return db.scalars(statement).all()
+
+
+@app.get(
+    "/customers/{customer_id}/predict-churn",
+    response_model=ChurnPredictionResponse,
+    tags=["Machine Learning"],
+)
+def predict_customer_churn_from_database(
+    customer_id: int,
+    db: Session = Depends(get_db),
+):
+    customer = db.get(Customer, customer_id)
+
+    if customer is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Customer not found.",
+        )
+
+    subscription_statement = (
+        select(Subscription)
+        .where(Subscription.customer_id == customer_id)
+        .order_by(Subscription.id.desc())
+    )
+    subscription = db.scalars(subscription_statement).first()
+
+    if subscription is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No subscription found for this customer.",
+        )
+
+    now = datetime.now(timezone.utc)
+    thirty_days_ago = now - timedelta(days=30)
+
+    events_statement = (
+        select(UsageEvent)
+        .where(UsageEvent.customer_id == customer_id)
+        .order_by(UsageEvent.occurred_at)
+    )
+    events = db.scalars(events_statement).all()
+
+    def as_utc(timestamp: datetime) -> datetime:
+        if timestamp.tzinfo is None:
+            return timestamp.replace(tzinfo=timezone.utc)
+        return timestamp.astimezone(timezone.utc)
+
+    recent_events = [
+        event for event in events
+        if as_utc(event.occurred_at) >= thirty_days_ago
+    ]
+
+    last_activity = (
+        max(as_utc(event.occurred_at) for event in events)
+        if events
+        else None
+    )
+
+    days_since_last_activity = (
+        max(0, (now - last_activity).days)
+        if last_activity is not None
+        else 365
+    )
+
+    features = {
+        "plan": subscription.plan,
+        "monthly_price": float(subscription.monthly_price),
+        "tenure_months": max(
+            1,
+            (now.date() - subscription.start_date).days // 30,
+        ),
+        "logins_last_30_days": sum(
+            event.event_type == "login" for event in recent_events
+        ),
+        "feature_uses_last_30_days": sum(
+            event.event_type == "feature_used" for event in recent_events
+        ),
+        "support_requests_last_30_days": sum(
+            event.event_type == "support_request" for event in recent_events
+        ),
+        "days_since_last_activity": min(days_since_last_activity, 3650),
+    }
+
+    result = predict_churn(churn_model, features)
+
+    return {
+        **result,
+        "customer_id": customer_id,
+        "features_used": features,
+    }
 
 
 @app.get(
